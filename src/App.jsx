@@ -1017,7 +1017,6 @@ function FinalScreen({ teamName, selectedZones, scores, onRestart, onGoTower }) 
 
       <div style={{ display: "flex", gap: 10 }}>
         <button style={{ ...S.btn, background: "#374151", flex: 1 }} onClick={onRestart}>처음으로</button>
-        <button onClick={onGoTower} style={{ flex: 1, padding: "14px", fontSize: 14, fontWeight: 600, color: "#6B7280", background: "transparent", border: "1.5px solid #D1D5DB", borderRadius: 12, cursor: "pointer" }}>강사 모드 →</button>
       </div>
     </div></div>
   );
