@@ -1403,6 +1403,8 @@ export default function App() {
 
   const handleGoTower = () => setView("tower");
 
+  const handleBackToZones = () => setView("zone-select");
+
   return (
     <>
       <style>{`* { box-sizing: border-box; margin: 0; padding: 0; } body { background: #F3F4F6; font-family: -apple-system, 'Helvetica Neue', sans-serif; } input:focus, textarea:focus { outline: none; } @keyframes spin { to { transform: rotate(360deg); } } @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }`}</style>
