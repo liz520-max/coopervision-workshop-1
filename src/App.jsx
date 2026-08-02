@@ -145,31 +145,59 @@ const MISSIONS = [
 
 const MAX_SCORE = 20;
 const STORAGE_KEY = "workshop-cv-v9";
+const ACTIVITY_SCORE_KEY = "activity-scores-v1";
 const INSTRUCTOR_PIN = "1234";
 const AI_TIMEOUT_MS = 25000;
 
 // ── 스토리지 (자체 백엔드 /api/teams 사용, api/teams.js 참고) ──────
-async function loadAllTeams() {
+// /api/teams 는 key 파라미터로 임의의 JSON 배열을 저장/조회하는 범용 저장소로 동작합니다.
+async function sharedGet(key) {
   try {
     const tp = new Promise((_, r) => setTimeout(() => r(new Error("timeout")), 4000));
-    const res = await Promise.race([fetch(`/api/teams?key=${STORAGE_KEY}`), tp]);
+    const res = await Promise.race([fetch(`/api/teams?key=${encodeURIComponent(key)}`), tp]);
     if (!res.ok) return [];
     const data = await res.json();
     return Array.isArray(data.teams) ? data.teams : [];
   } catch { return []; }
 }
-async function upsertTeam(entry) {
+async function sharedSet(key, value) {
   try {
-    const all = await loadAllTeams();
-    const idx = all.findIndex(e => e.team === entry.team);
-    if (idx >= 0) all[idx] = entry; else all.push(entry);
-    all.sort((a, b) => b.total - a.total);
     const tp = new Promise((_, r) => setTimeout(() => r(new Error("timeout")), 4000));
-    await Promise.race([fetch("/api/teams", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: STORAGE_KEY, teams: all }) }), tp]);
+    await Promise.race([fetch("/api/teams", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, teams: value }) }), tp]);
   } catch {}
+}
+
+async function loadAllTeams() { return sharedGet(STORAGE_KEY); }
+async function upsertTeam(entry) {
+  const all = await loadAllTeams();
+  const idx = all.findIndex(e => e.team === entry.team);
+  if (idx >= 0) all[idx] = entry; else all.push(entry);
+  all.sort((a, b) => b.total - a.total);
+  await sharedSet(STORAGE_KEY, all);
 }
 async function clearAllTeams() {
   try { await fetch(`/api/teams?key=${STORAGE_KEY}`, { method: "DELETE" }); } catch {}
+}
+
+// ── 액티비티(오프라인 게임형 미션) 강사 성과 점수 저장소 ────────────
+// 강사가 Control Tower에서 직접 입력하는 점수 (0~10점, CV가치 항목 50%를 대체)
+async function loadActivityScores() { return sharedGet(ACTIVITY_SCORE_KEY); }
+async function saveActivityScore(team, missionId, caseNum, score, note) {
+  const all = await loadActivityScores();
+  const idx = all.findIndex(e => e.team === team && e.missionId === missionId && e.caseNum === caseNum);
+  const entry = { team, missionId, caseNum, score, note: note || "", updatedAt: Date.now() };
+  if (idx >= 0) all[idx] = entry; else all.push(entry);
+  await sharedSet(ACTIVITY_SCORE_KEY, all);
+  return all;
+}
+async function deleteActivityScore(team, missionId, caseNum) {
+  const all = await loadActivityScores();
+  const next = all.filter(e => !(e.team === team && e.missionId === missionId && e.caseNum === caseNum));
+  await sharedSet(ACTIVITY_SCORE_KEY, next);
+  return next;
+}
+function findActivityScore(all, team, missionId, caseNum) {
+  return all.find(e => e.team === team && e.missionId === missionId && e.caseNum === caseNum) || null;
 }
 
 // ── 채점 ─────────────────────────────────────────────────────
@@ -246,6 +274,62 @@ async function scoreWithAI(mission, caseItem, answer) {
   } catch { return buildFallbackResult(answer); }
 }
 
+// ── 액티비티(오프라인 게임형 미션) 소감 채점 ─────────────────────
+// CV가치(10점, 50%)는 강사가 Control Tower에서 직접 입력한 성과 점수로 대체되므로,
+// 여기서는 짧은 소감을 바탕으로 논리성/합리성/해결가능성(총 9.9점 ≈ 10점, 50%)만 채점합니다.
+function buildActivityFallback(answer) {
+  const t = answer.trim();
+  const lg = ["따라서","때문에","그러므로","단계","첫째","둘째","먼저","다음으로","느꼈다","깨달았다"];
+  const rs = ["합리적","효과적","실질적","근거","구체적","전략","제안","경험"];
+  const sl = ["적용","실천","앞으로","계획","협력","소통","역할","반영"];
+  const lgH = lg.filter(k => t.includes(k));
+  const rsH = rs.filter(k => t.includes(k));
+  const slH = sl.filter(k => t.includes(k));
+  const lgS = Math.min(3.3, 1 + lgH.length * 0.8);
+  const rsS = Math.min(3.3, 1 + rsH.length * 0.8);
+  const slS = Math.min(3.3, 1 + slH.length * 0.8);
+  return {
+    isFallback: true,
+    logic: Math.round(lgS * 10) / 10, reason: Math.round(rsS * 10) / 10, solution: Math.round(slS * 10) / 10,
+    criteria_feedback: {
+      logic:    { score: Math.round(lgS*10)/10, max: 3.3, reason: lgH.length > 0 ? `소감에 논리 흐름 키워드(${lgH.join(", ")})가 포함되어 있습니다.` : "느낀 점을 순서대로 정리하면 더 좋아요." },
+      reason:   { score: Math.round(rsS*10)/10, max: 3.3, reason: rsH.length > 0 ? `구체적인 경험/근거 키워드(${rsH.join(", ")})가 포함되어 있습니다.` : "활동에서 있었던 구체적인 순간을 언급하면 더 좋아요." },
+      solution: { score: Math.round(slS*10)/10, max: 3.3, reason: slH.length > 0 ? `실천/적용 관련 키워드(${slH.join(", ")})가 포함되어 있습니다.` : "앞으로 어떻게 적용할지 한 줄 덧붙이면 더 좋아요." },
+    },
+    strengths: t.length >= 50 ? "소감을 충분히 구체적으로 작성했습니다." : "",
+    improvements: "AI 채점 서버에 연결하지 못해 자동 채점되었습니다.",
+    feedback: "자동 채점으로 대체되었습니다.",
+  };
+}
+
+async function scoreActivityReflection(mission, caseItem, answer) {
+  if (answer.trim().length < 20) return {
+    isFallback: false, logic: 0, reason: 0, solution: 0,
+    criteria_feedback: {
+      logic:    { score: 0, max: 3.3, reason: "소감이 20자 미만으로 채점되지 않습니다." },
+      reason:   { score: 0, max: 3.3, reason: "소감이 20자 미만으로 채점되지 않습니다." },
+      solution: { score: 0, max: 3.3, reason: "소감이 20자 미만으로 채점되지 않습니다." },
+    },
+    strengths: "", improvements: "", feedback: "소감이 20자 미만입니다.",
+  };
+
+  const prompt = `당신은 CooperVision 워크샵 액티비티 소감 채점관입니다.\n\n${CV_VALUES}\n\n[이 존의 핵심 가치]\n${mission.zoneValue}\n\n[진행한 액티비티]\n제목: ${caseItem.title}\n활동 안내: ${caseItem.quote}\n의미: ${caseItem.background}\n\n[성찰 질문]\n${mission.question}\n\n[참가자 소감]\n${answer}\n\n=== 채점 기준 (총 9.9점, 소감 채점만 해당 — 이 활동의 실제 성과 점수는 강사가 별도로 채점합니다) ===\n20자 미만 → 0점\n1. 논리성 (최대 3.3점)\n2. 설명의 합리성/구체성 (최대 3.3점)\n3. 실천/적용 가능성 (최대 3.3점)\n\n반드시 JSON만 출력:\n{"logic":숫자(0-3.3),"reason":숫자(0-3.3),"solution":숫자(0-3.3),"criteria_feedback":{"logic":{"score":숫자,"max":3.3,"reason":"근거 1-2문장"},"reason":{"score":숫자,"max":3.3,"reason":"근거 1-2문장"},"solution":{"score":숫자,"max":3.3,"reason":"근거 1-2문장"}},"strengths":"잘한 점 1-2문장","improvements":"개선할 점 1-2문장","feedback":"종합 1-2문장"}`;
+
+  try {
+    const tp = new Promise((_, r) => setTimeout(() => r(new Error("timeout")), AI_TIMEOUT_MS));
+    const res = await Promise.race([fetch("/api/score", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt }) }), tp]);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await Promise.race([res.json(), tp]);
+    const text = data.content?.map(c => c.text || "").join("") || "";
+    const p = JSON.parse(text.replace(/```json|```/g, "").trim());
+    if (typeof p.logic === "number" && typeof p.reason === "number" && typeof p.solution === "number") {
+      const clamp = (n) => Math.max(0, Math.min(3.3, Math.round(n * 10) / 10));
+      return { ...p, logic: clamp(p.logic), reason: clamp(p.reason), solution: clamp(p.solution), isFallback: false };
+    }
+    throw new Error("invalid");
+  } catch { return buildActivityFallback(answer); }
+}
+
 // ── 공통 UI ──────────────────────────────────────────────────
 function CriteriaCard({ label, score, max, reason, color, weight }) {
   const pct = Math.min(100, (score / max) * 100);
@@ -271,7 +355,7 @@ function DetailedFeedback({ result, color, compact = false }) {
   const [show, setShow] = useState(!compact);
   if (!result) return null;
   const items = [
-    { key: "cv_value", label: "CooperVision 가치 부합", max: 10, weight: "50%" },
+    { key: "cv_value", label: result.isActivity ? "활동 성과 (강사 평가)" : "CooperVision 가치 부합", max: 10, weight: "50%" },
     { key: "logic",    label: "논리성",                 max: 3.3, weight: "16.7%" },
     { key: "reason",   label: "설명의 합리성",           max: 3.3, weight: "16.7%" },
     { key: "solution", label: "해결 가능성",             max: 3.3, weight: "16.7%" },
@@ -368,7 +452,7 @@ function ZoneNavigator({ missionIndex, selectedZones, scores, onNavigate }) {
 // ── 리포트 화면 ───────────────────────────────────────────────
 function ReportScreen({ teamName, missionIndex, result, selectedCase, mission, onClose }) {
   const items = [
-    { key: "cv_value", label: "CooperVision 가치 부합", max: 10, weight: "50%", desc: "핵심 가치가 답변에 실질적으로 반영되었는가?" },
+    { key: "cv_value", label: result.isActivity ? "활동 성과 (강사 평가)" : "CooperVision 가치 부합", max: 10, weight: "50%", desc: result.isActivity ? "오프라인 활동에서 강사가 관찰한 실제 성과" : "핵심 가치가 답변에 실질적으로 반영되었는가?" },
     { key: "logic",    label: "논리성",                 max: 3.3, weight: "16.7%", desc: "문제→원인→해결의 흐름이 체계적인가?" },
     { key: "reason",   label: "설명의 합리성",           max: 3.3, weight: "16.7%", desc: "해결책의 근거가 납득 가능한가?" },
     { key: "solution", label: "해결 가능성",             max: 3.3, weight: "16.7%", desc: "실제 현업에서 실행 가능한 방안인가?" },
@@ -570,11 +654,45 @@ function MissionScreen({ teamName, missionIndex, selectedZones, scores, onNext, 
   const runningTotal = Object.values(scores).reduce((a, b) => a + (b?.score || 0), 0);
   const pos = selectedZones.indexOf(missionIndex);
   const isLast = pos === selectedZones.length - 1;
+  const isActivity = !!selectedCase?.num?.startsWith("액티비티");
 
   const handleSubmit = async () => {
     if (!answer.trim() || loading) return;
     setLoading(true);
-    const res = await scoreWithAI(mission, selectedCase, answer);
+    let res;
+    if (isActivity) {
+      const [reflection, activityAll] = await Promise.all([
+        scoreActivityReflection(mission, selectedCase, answer),
+        loadActivityScores(),
+      ]);
+      const perf = findActivityScore(activityAll, teamName, mission.id, selectedCase.num);
+      const pending = !perf;
+      const cvScore = pending ? 5 : Math.max(0, Math.min(10, perf.score));
+      const total = Math.max(0, Math.min(20, Math.round((cvScore + reflection.logic + reflection.reason + reflection.solution) * 10) / 10));
+      res = {
+        score: total,
+        isFallback: reflection.isFallback,
+        isActivity: true,
+        pendingInstructorScore: pending,
+        breakdown: { cv_value: cvScore, logic: reflection.logic, reason: reflection.reason, solution: reflection.solution },
+        criteria_feedback: {
+          cv_value: {
+            score: cvScore, max: 10,
+            reason: pending
+              ? "강사가 아직 이 활동의 성과 점수를 입력하지 않아 임시로 5점이 적용되었습니다. 강사가 Control Tower에서 점수를 입력하면 이후 새로고침 시 반영됩니다."
+              : `강사가 평가한 활동 성과 점수입니다${perf.note ? ` (${perf.note})` : ""}.`,
+          },
+          logic: reflection.criteria_feedback.logic,
+          reason: reflection.criteria_feedback.reason,
+          solution: reflection.criteria_feedback.solution,
+        },
+        strengths: reflection.strengths,
+        improvements: reflection.improvements,
+        feedback: reflection.feedback,
+      };
+    } else {
+      res = await scoreWithAI(mission, selectedCase, answer);
+    }
     setResult({ ...res, myAnswer: answer });
     setLoading(false); setPhase("result");
   };
@@ -676,17 +794,28 @@ function MissionScreen({ teamName, missionIndex, selectedZones, scores, onNext, 
             <button onClick={() => setPhase("detail")} style={{ fontSize: 11, color: mission.color, background: "transparent", border: "none", cursor: "pointer", fontWeight: 600 }}>상세 보기</button>
           </div>
           <div style={{ background: "#111", borderRadius: 10, padding: "12px 16px", marginBottom: 14, fontSize: 14, color: "#fff", lineHeight: 1.6, fontWeight: 500 }}>Q. {mission.question}</div>
-          <textarea style={{ ...S.textarea, borderColor: charCount > 0 ? mission.color : "#E5E7EB" }} placeholder="CooperVision 가치를 담아 답변을 작성하세요..." value={answer} onChange={e => setAnswer(e.target.value)} rows={6} disabled={loading} autoFocus />
+          {isActivity && (
+            <div style={{ background: mission.bg, border: `1px solid ${mission.color}30`, borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#4B5563", lineHeight: 1.6 }}>
+              💡 이 미션은 <b>오프라인 활동의 실제 성과</b>는 강사가 별도로 채점합니다. 여기서는 활동 중 느낀 점을 짧게 적어주세요.
+            </div>
+          )}
+          <textarea style={{ ...S.textarea, borderColor: charCount > 0 ? mission.color : "#E5E7EB" }} placeholder={isActivity ? "활동을 하며 느낀 점, CooperVision 가치와의 연결을 자유롭게 적어주세요..." : "CooperVision 가치를 담아 답변을 작성하세요..."} value={answer} onChange={e => setAnswer(e.target.value)} rows={6} disabled={loading} autoFocus />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: charCount < 50 ? "#F59E0B" : "#10B981" }}>{charCount}자</span>
-              {charCount < 50 ? <span style={{ fontSize: 11, color: "#F59E0B" }}>({50 - charCount}자 더 쓰면 최소 10점)</span> : <span style={{ fontSize: 11, color: "#10B981" }}>최소 10점 보장 ✓</span>}
+              {isActivity ? (
+                <span style={{ fontSize: 12, fontWeight: 600, color: charCount < 20 ? "#F59E0B" : "#10B981" }}>{charCount}자 {charCount < 20 ? `(${20 - charCount}자 더 필요)` : "✓"}</span>
+              ) : (
+                <>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: charCount < 50 ? "#F59E0B" : "#10B981" }}>{charCount}자</span>
+                  {charCount < 50 ? <span style={{ fontSize: 11, color: "#F59E0B" }}>({50 - charCount}자 더 쓰면 최소 10점)</span> : <span style={{ fontSize: 11, color: "#10B981" }}>최소 10점 보장 ✓</span>}
+                </>
+              )}
             </div>
           </div>
           {loading && (
             <div style={{ background: mission.bg, borderRadius: 12, padding: "14px", marginBottom: 14, textAlign: "center" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 4 }}>
-                <span style={S.spinner} /><span style={{ fontSize: 14, fontWeight: 600, color: mission.color }}>AI 채점 중...</span>
+                <span style={S.spinner} /><span style={{ fontSize: 14, fontWeight: 600, color: mission.color }}>{isActivity ? "소감 채점 중..." : "AI 채점 중..."}</span>
               </div>
               <div style={{ fontSize: 12, color: "#9CA3AF" }}>최대 25초</div>
             </div>
@@ -773,6 +902,34 @@ function MissionScreen({ teamName, missionIndex, selectedZones, scores, onNext, 
               </button>
             </div>
           </div>
+
+          {result.isActivity && result.pendingInstructorScore && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 12, padding: "12px 14px", marginBottom: 16 }}>
+              <span style={{ fontSize: 18 }}>⏳</span>
+              <div style={{ flex: 1, fontSize: 12, color: "#92400E", lineHeight: 1.6 }}>강사가 아직 이 활동의 성과 점수를 입력하지 않았습니다 (현재 임시 5점 적용). 강사 입력 후 아래에서 다시 확인해보세요.</div>
+              <button
+                onClick={async () => {
+                  setLoading(true);
+                  const activityAll = await loadActivityScores();
+                  const perf = findActivityScore(activityAll, teamName, mission.id, selectedCase.num);
+                  if (perf) {
+                    const cvScore = Math.max(0, Math.min(10, perf.score));
+                    const total = Math.max(0, Math.min(20, Math.round((cvScore + result.breakdown.logic + result.breakdown.reason + result.breakdown.solution) * 10) / 10));
+                    setResult({
+                      ...result,
+                      score: total,
+                      pendingInstructorScore: false,
+                      breakdown: { ...result.breakdown, cv_value: cvScore },
+                      criteria_feedback: { ...result.criteria_feedback, cv_value: { score: cvScore, max: 10, reason: `강사가 평가한 활동 성과 점수입니다${perf.note ? ` (${perf.note})` : ""}.` } },
+                    });
+                  }
+                  setLoading(false);
+                }}
+                style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, color: "#92400E", background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 20, padding: "6px 12px", cursor: "pointer" }}>
+                다시 확인
+              </button>
+            </div>
+          )}
 
           <DetailedFeedback result={result} color={mission.color} compact={true} />
 
@@ -868,16 +1025,21 @@ function FinalScreen({ teamName, selectedZones, scores, onRestart, onGoTower }) 
 
 // ── 강사 Control Tower ────────────────────────────────────────
 function ControlTower({ onExit }) {
+  const [tab, setTab] = useState("leaderboard"); // "leaderboard" | "activity"
   const [teams, setTeams] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selectedTeam, setSelectedTeam] = useState(null);
   const [zoneFilter, setZoneFilter] = useState(null);
   const [lastRefresh, setLastRefresh] = useState("–");
   const [confirmClear, setConfirmClear] = useState(false);
+  const [activityScores, setActivityScores] = useState([]);
 
   const refresh = async () => {
     setLoading(true);
-    try { const d = await loadAllTeams(); setTeams(d); setLastRefresh(new Date().toLocaleTimeString("ko-KR")); }
+    try {
+      const [d, a] = await Promise.all([loadAllTeams(), loadActivityScores()]);
+      setTeams(d); setActivityScores(a); setLastRefresh(new Date().toLocaleTimeString("ko-KR"));
+    }
     catch {} finally { setLoading(false); }
   };
 
@@ -1021,6 +1183,13 @@ function ControlTower({ onExit }) {
           : <div style={{ display: "flex", gap: 6 }}><button onClick={handleClear} style={{ padding: "6px 12px", background: "#EF4444", border: "none", borderRadius: 8, color: "#fff", fontSize: 12, cursor: "pointer" }}>확인</button><button onClick={() => setConfirmClear(false)} style={{ padding: "6px 12px", background: "#334155", border: "none", borderRadius: 8, color: "#CBD5E1", fontSize: 12, cursor: "pointer" }}>취소</button></div>}
         <button onClick={onExit} style={{ padding: "6px 12px", background: "transparent", border: "1px solid #475569", borderRadius: 8, color: "#94A3B8", fontSize: 12, cursor: "pointer" }}>나가기</button>
       </div>
+      <div style={{ display: "flex", gap: 6, padding: "10px 20px 0", background: "#1E293B", borderBottom: "1px solid #334155" }}>
+        <button onClick={() => setTab("leaderboard")} style={{ padding: "8px 16px", background: "transparent", border: "none", borderBottom: tab === "leaderboard" ? "2px solid #4F46E5" : "2px solid transparent", color: tab === "leaderboard" ? "#fff" : "#64748B", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>🏆 리더보드</button>
+        <button onClick={() => setTab("activity")} style={{ padding: "8px 16px", background: "transparent", border: "none", borderBottom: tab === "activity" ? "2px solid #4F46E5" : "2px solid transparent", color: tab === "activity" ? "#fff" : "#64748B", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>🎯 액티비티 성과 입력</button>
+      </div>
+      {tab === "activity" ? (
+        <ActivityScorePanel activityScores={activityScores} teams={teams} onChange={refresh} />
+      ) : (
       <div style={{ padding: "18px 20px" }}>
         {loading && <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, padding: "8px 14px", background: "#1E293B", borderRadius: 8, width: "fit-content" }}><span style={{ ...S.spinner, borderTopColor: "#94A3B8" }} /><span style={{ fontSize: 12, color: "#94A3B8" }}>불러오는 중...</span></div>}
         <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
@@ -1080,6 +1249,114 @@ function ControlTower({ onExit }) {
           </div>
         )}
       </div>
+      )}
+    </div>
+  );
+}
+
+// ── 강사용 액티비티 성과 입력 패널 ──────────────────────────────
+function ActivityScorePanel({ activityScores, teams, onChange }) {
+  const activityMissions = MISSIONS.filter(m => m.cases.some(c => c.num.startsWith("액티비티")));
+  const [team, setTeam] = useState("");
+  const [missionId, setMissionId] = useState(activityMissions[0]?.id || "");
+  const currentMission = MISSIONS.find(m => m.id === missionId) || activityMissions[0];
+  const activityCases = currentMission ? currentMission.cases.filter(c => c.num.startsWith("액티비티")) : [];
+  const [caseNum, setCaseNum] = useState(activityCases[0]?.num || "");
+  const [score, setScore] = useState(8);
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const knownTeamNames = Array.from(new Set(teams.map(t => t.team)));
+
+  const handleMissionChange = (id) => {
+    setMissionId(id);
+    const m = MISSIONS.find(x => x.id === id);
+    const cs = m ? m.cases.filter(c => c.num.startsWith("액티비티")) : [];
+    setCaseNum(cs[0]?.num || "");
+  };
+
+  const handleSave = async () => {
+    if (!team.trim() || !missionId || !caseNum) return;
+    setSaving(true);
+    await saveActivityScore(team.trim(), missionId, caseNum, Number(score), note.trim());
+    setSaving(false);
+    setNote("");
+    onChange && onChange();
+  };
+
+  const handleDelete = async (entry) => {
+    await deleteActivityScore(entry.team, entry.missionId, entry.caseNum);
+    onChange && onChange();
+  };
+
+  return (
+    <div style={{ padding: "18px 20px" }}>
+      <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 16, lineHeight: 1.6 }}>
+        F존·P존의 오프라인 액티비티는 여기서 강사가 직접 성과 점수(0~10점)를 입력합니다. 이 점수는 참가자가 해당 미션의 소감을 제출할 때 CooperVision 가치 항목(50%)으로 자동 반영됩니다. <b>가능하면 활동이 끝난 직후, 참가자가 소감을 쓰기 전에 입력해주세요.</b>
+      </div>
+
+      <div style={{ background: "#1E293B", border: "1px solid #334155", borderRadius: 14, padding: 18, marginBottom: 22 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 11, color: "#64748B", marginBottom: 6 }}>팀 이름</div>
+            <input list="known-teams" value={team} onChange={e => setTeam(e.target.value)} placeholder="예) 드림팀"
+              style={{ width: "100%", padding: "9px 12px", background: "#0F172A", border: "1px solid #334155", borderRadius: 8, color: "#fff", fontSize: 13, fontFamily: "inherit" }} />
+            <datalist id="known-teams">{knownTeamNames.map(n => <option key={n} value={n} />)}</datalist>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: "#64748B", marginBottom: 6 }}>존</div>
+            <select value={missionId} onChange={e => handleMissionChange(e.target.value)}
+              style={{ width: "100%", padding: "9px 12px", background: "#0F172A", border: "1px solid #334155", borderRadius: 8, color: "#fff", fontSize: 13, fontFamily: "inherit" }}>
+              {activityMissions.map(m => <option key={m.id} value={m.id}>{m.title}</option>)}
+            </select>
+          </div>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11, color: "#64748B", marginBottom: 6 }}>액티비티</div>
+          <select value={caseNum} onChange={e => setCaseNum(e.target.value)}
+            style={{ width: "100%", padding: "9px 12px", background: "#0F172A", border: "1px solid #334155", borderRadius: 8, color: "#fff", fontSize: 13, fontFamily: "inherit" }}>
+            {activityCases.map(c => <option key={c.num} value={c.num}>{c.num} — {c.title}</option>)}
+          </select>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ fontSize: 11, color: "#64748B" }}>성과 점수 (0~10)</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: "#4F46E5" }}>{Number(score).toFixed(1)}</span>
+          </div>
+          <input type="range" min="0" max="10" step="0.5" value={score} onChange={e => setScore(e.target.value)} style={{ width: "100%" }} />
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, color: "#64748B", marginBottom: 6 }}>메모 (선택, 팀에게 보여짐 — 예: "탑 높이 92cm, 1등")</div>
+          <input value={note} onChange={e => setNote(e.target.value)} placeholder="예) 탑 높이 92cm · 팀 내 협업 우수"
+            style={{ width: "100%", padding: "9px 12px", background: "#0F172A", border: "1px solid #334155", borderRadius: 8, color: "#fff", fontSize: 13, fontFamily: "inherit" }} />
+        </div>
+        <button onClick={handleSave} disabled={!team.trim() || saving}
+          style={{ padding: "10px 18px", background: !team.trim() ? "#334155" : "#4F46E5", border: "none", borderRadius: 10, color: "#fff", fontSize: 13, fontWeight: 700, cursor: !team.trim() ? "default" : "pointer", opacity: saving ? 0.6 : 1 }}>
+          {saving ? "저장 중..." : "저장"}
+        </button>
+      </div>
+
+      <div style={{ fontSize: 12, fontWeight: 700, color: "#CBD5E1", marginBottom: 10 }}>입력된 성과 점수 ({activityScores.length}건)</div>
+      {activityScores.length === 0 ? (
+        <div style={{ textAlign: "center", padding: 40, color: "#64748B", fontSize: 13 }}>아직 입력된 점수가 없습니다</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {activityScores.slice().sort((a, b) => b.updatedAt - a.updatedAt).map(entry => {
+            const m = MISSIONS.find(x => x.id === entry.missionId);
+            return (
+              <div key={`${entry.team}-${entry.missionId}-${entry.caseNum}`} style={{ display: "flex", alignItems: "center", gap: 10, background: "#1A2332", border: "1px solid #334155", borderRadius: 10, padding: "10px 14px" }}>
+                <div style={{ width: 26, height: 26, borderRadius: "50%", background: m?.color || "#334155", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700 }}>{m?.zone}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{entry.team} <span style={{ fontSize: 11, color: "#64748B", fontWeight: 400 }}>· {entry.caseNum}</span></div>
+                  {entry.note && <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>{entry.note}</div>}
+                </div>
+                <div style={{ fontFamily: "Georgia, serif", fontSize: 18, fontWeight: 800, color: "#4F46E5" }}>{Number(entry.score).toFixed(1)}</div>
+                <button onClick={() => handleDelete(entry)} style={{ fontSize: 11, color: "#EF4444", background: "transparent", border: "1px solid #EF4444", borderRadius: 8, padding: "4px 8px", cursor: "pointer" }}>삭제</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
