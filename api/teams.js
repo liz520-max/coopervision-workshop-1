@@ -6,8 +6,8 @@
 //   UPSTASH_REDIS_REST_TOKEN
 // (Vercel 대시보드 > Storage 탭에서 Upstash Redis를 바로 추가하면 자동으로 등록됩니다.)
 
-const BASE = process.env.UPSTASH_REDIS_REST_URL;
-const TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const BASE = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+const TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 
 async function redisGet(key) {
   const r = await fetch(`${BASE}/get/${encodeURIComponent(key)}`, {
