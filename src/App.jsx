@@ -636,7 +636,7 @@ function ZoneSelectScreen({ teamName, onStart, onBack }) {
 }
 
 // ── 미션 화면 ─────────────────────────────────────────────────
-function MissionScreen({ teamName, missionIndex, selectedZones, scores, onNext, onGoTower, onNavigate }) {
+function MissionScreen({ teamName, missionIndex, selectedZones, scores, onNext, onGoTower, onNavigate, onBackToZones }) {
   const mission = MISSIONS[missionIndex];
   const existingResult = scores[missionIndex] || null;
   const [phase, setPhase] = useState(existingResult ? "result" : "select");
@@ -718,7 +718,7 @@ function MissionScreen({ teamName, missionIndex, selectedZones, scores, onNext, 
       <ZoneNavigator missionIndex={missionIndex} selectedZones={selectedZones} scores={scores} onNavigate={onNavigate} />
 
       {/* 존 헤더 */}
-      <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 16px", borderRadius: 12, background: mission.bg, marginBottom: 22 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 16px", borderRadius: 12, background: mission.bg, marginBottom: 8 }}>
         <div style={{ width: 52, height: 52, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: `0 4px 16px ${mission.color}55` }}>
           {ZONE_ICONS[mission.zone] ? <div style={{ transform: "scale(1.8)", transformOrigin: "center" }}>{ZONE_ICONS[mission.zone]}</div> : <div style={{ width: 52, height: 52, borderRadius: "50%", background: mission.color, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Georgia, serif", fontSize: 22, fontWeight: 700 }}>{mission.zone}</div>}
         </div>
@@ -729,6 +729,13 @@ function MissionScreen({ teamName, missionIndex, selectedZones, scores, onNext, 
           ))}
         </div>
       </div>
+
+      {/* 존을 잘못 들어왔다면 존 선택 화면으로 돌아가기 — 아직 어떤 존도 완료 전일 때만 노출 (진행 점수 보호) */}
+      {Object.keys(scores).length === 0 && onBackToZones && (
+        <button onClick={onBackToZones} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "#9CA3AF", background: "transparent", border: "none", cursor: "pointer", padding: "0 0 18px 2px" }}>
+          ← 존을 잘못 선택했나요? 존 선택으로 돌아가기
+        </button>
+      )}
 
       {/* PHASE: select */}
       {phase === "select" && (
@@ -1401,7 +1408,7 @@ export default function App() {
       <style>{`* { box-sizing: border-box; margin: 0; padding: 0; } body { background: #F3F4F6; font-family: -apple-system, 'Helvetica Neue', sans-serif; } input:focus, textarea:focus { outline: none; } @keyframes spin { to { transform: rotate(360deg); } } @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }`}</style>
       {view === "login"       && <LoginScreen onLogin={handleLogin} onInstructor={() => setView("tower")} />}
       {view === "zone-select" && <ZoneSelectScreen teamName={teamName} onStart={handleZoneStart} onBack={() => setView("login")} />}
-      {view === "game"        && <MissionScreen key={`m-${missionIndex}`} teamName={teamName} missionIndex={missionIndex} selectedZones={selectedZones} scores={scores} onNext={handleNext} onGoTower={handleGoTower} onNavigate={handleNavigate} />}
+      {view === "game"        && <MissionScreen key={`m-${missionIndex}`} teamName={teamName} missionIndex={missionIndex} selectedZones={selectedZones} scores={scores} onNext={handleNext} onGoTower={handleGoTower} onNavigate={handleNavigate} onBackToZones={handleBackToZones} />}
       {view === "final"       && <FinalScreen teamName={teamName} selectedZones={selectedZones} scores={scores} onRestart={handleRestart} onGoTower={handleGoTower} />}
       {view === "tower"       && <ControlTower onExit={() => setView("login")} />}
     </>
